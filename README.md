@@ -98,4 +98,6 @@ checkbashisms *.sh
 
 See also https://github.com/PanderMusubi/dutch-holidays and https://github.com/commenthol/date-holidays-ical for calendars related to holidays.
 
-The lunar phase data used here is from the Python package [astral](https://astral.readthedocs.io/en/latest/index.html#moon). Its maintainer made a in the documentation of it a reference back to this project as a showcase of it usage. Many thanks for this.
+The lunar phase moments are computed with the Python package [ephem](https://rhodesmill.org/pyephem/) (PyEphem), which gives the exact times of the new, first quarter, full and last quarter moons. Those instants are converted to each country's local time zone so every phase falls on the correct local calendar day.
+
+This project previously used [astral](https://astral.readthedocs.io/en/latest/index.html#moon), whose maintainer kindly referenced it in the astral documentation as a showcase of its usage. Many thanks for this. It was switched to ephem because astral's simplified phase model can be off by up to a day for events close to local midnight.

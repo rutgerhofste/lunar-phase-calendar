@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Generates calendars with lunar phase in iCal format."""
 
-from datetime import date, datetime, timedelta, UTC
+from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 from json import load
+from math import degrees, pi
 from os.path import isdir
 from os import makedirs, chdir
+from zoneinfo import ZoneInfo
 
-from astral.moon import phase
+import ephem
 
 # pylint:disable=unspecified-encoding,disable=consider-using-with
 
@@ -33,48 +35,85 @@ def moon_phase_code_to_symbol(code: int) -> str:
     return MOON_PHASE_SYMBOLS[code]
 
 
-def moon_phase_to_inacurate_code(phase: float) -> int:
-    """Convert moon phase code to inacurate code."""
-    value = int(phase)
-    res = None
-    if value == 0:
-        res = 0
-    elif 0 < value < 7:
-        res = 1
-    elif value == 7:
-        res = 2
-    elif 7 < value < 14:
-        res = 3
-    elif value == 14:
-        res = 4
-    elif 14 < value < 21:
-        res = 5
-    elif value == 21:
-        res = 6
-    else:
-        res = 7
-    return res
+# The four principal phases and their code, in cycle order, paired with the
+# ephem function that returns the next occurrence of that phase.
+PRINCIPAL_PHASES = (
+    (ephem.next_new_moon, 0),
+    (ephem.next_first_quarter_moon, 2),
+    (ephem.next_full_moon, 4),
+    (ephem.next_last_quarter_moon, 6),
+)
 
 
-def day_to_moon_phase_and_accurate_code(day: date) -> tuple[float, int]:
-    """Convert day to moon phase and accurate code."""
-    phase_today = phase(day)
-    code_today = moon_phase_to_inacurate_code(phase_today)
+def country_timezone(country: str) -> ZoneInfo:
+    """Read the country's time zone from its calendar header template."""
+    for line in open(f'../../templates/calendar-header-{country}.txt'):
+        line = line.strip()
+        if line.startswith('TZID:'):
+            return ZoneInfo(line[len('TZID:'):])
+    return ZoneInfo('UTC')
 
-    phase_yesterday = phase(day + timedelta(days=-1))
-    code_yesterday = moon_phase_to_inacurate_code(phase_yesterday)
 
-    if (code_today - code_yesterday) % 8 > 1:
-        # Skipped one code, hence do correction.
-        return phase_today, (code_today - 1) % 8
+def phase_position(instant: datetime) -> float:
+    """Moon phase as a value in [0, 28): new 0, first quarter 7, full 14,
+    last quarter 21.
 
-    if code_today % 2 != 0:
-        return phase_today, code_today
+    Computed from the true Sun-Moon elongation in ecliptic longitude, so the
+    principal phases land exactly on 0/7/14/21.
+    """
+    moon = ephem.Ecliptic(ephem.Moon(instant))
+    sun = ephem.Ecliptic(ephem.Sun(instant))
+    elongation = (moon.lon - sun.lon) % (2 * pi)
+    return degrees(elongation) / 360 * 28 % 28
 
-    if code_today == code_yesterday:
-        return phase_today, (code_today + 1) % 8
 
-    return phase_today, code_today
+def principal_phase_days(start: date, end: date, tz: ZoneInfo) -> dict:
+    """Map every local day in [start, end) that holds a principal phase to
+    its code.
+
+    ephem returns the exact UTC instant of each new/first-quarter/full/
+    last-quarter moon; that instant is converted to the country's local time
+    so the phase is recorded on the local calendar day on which it occurs.
+    """
+    days = {}
+    # Start the search a little before the window so the first in-window day
+    # already has a preceding principal phase to derive its arc from.
+    search_start = ephem.Date(datetime(start.year, start.month, start.day)
+                              - timedelta(days=40))
+    for next_phase, code in PRINCIPAL_PHASES:
+        when = search_start
+        while True:
+            when = next_phase(when)
+            local = when.datetime().replace(
+                tzinfo=timezone.utc).astimezone(tz).date()
+            if local >= end:
+                break
+            days[local] = code
+            when = ephem.Date(when + 0.5)
+    return days
+
+
+def day_codes(start: date, end: date, tz: ZoneInfo) -> dict:
+    """Map every local day in [start, end) to its moon phase code.
+
+    Principal phases come from the exact ephem event days; every other day
+    gets the intermediate phase of the arc that follows the most recent
+    principal phase (new -> waxing crescent, first quarter -> waxing gibbous,
+    full -> waning gibbous, last quarter -> waning crescent).
+    """
+    principal = principal_phase_days(start - timedelta(days=40), end, tz)
+    before = [day for day in principal if day < start]
+    last_code = principal[max(before)] if before else 6
+    codes = {}
+    day = start
+    while day < end:
+        if day in principal:
+            last_code = principal[day]
+            codes[day] = last_code
+        else:
+            codes[day] = (last_code + 1) % 8
+        day += timedelta(days=1)
+    return codes
 
 
 def write_files(country: str, lang: str) -> None:
@@ -159,13 +198,18 @@ def write_files(country: str, lang: str) -> None:
     for line in open('../../templates/event-footer.txt'):
         event_footer += line  # pylint:disable=consider-using-join
 
+    tz = country_timezone(country)
     today = date.today()
     start = today + timedelta(days=-6 * 31)
     end = today + timedelta(days=(5 * 366) + (3 * 31))
+    codes = day_codes(start, end, tz)
     for i in range((end - start).days):
         day = start + timedelta(days=i)
         dtstamp = start + timedelta(days=-7)
-        phase, code = day_to_moon_phase_and_accurate_code(day)
+        code = codes[day]
+        # Representative phase value, sampled at local noon of the day.
+        local_noon = datetime(day.year, day.month, day.day, 12, tzinfo=tz)
+        phase = phase_position(local_noon.astimezone(timezone.utc))
         symbol = moon_phase_code_to_symbol(code)
         name = moon_phase_code_to_name(code, lang)
         tsv_all.write(f'{day}\t{phase:6.3f}\t{symbol}\t{name}\n')
